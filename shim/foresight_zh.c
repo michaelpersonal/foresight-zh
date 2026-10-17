@@ -4,10 +4,15 @@
 // it: allow-dyld-environment-variables + disable-library-validation), so the
 // app's code signature is untouched.
 //
-// Engine "sensevoice" (default, ~/tools/foresight-zh/engine): the shim takes over
+// Engine "sensevoice" (~/tools/foresight-zh/engine): the shim takes over
 // OdmlSpeechProcessorTranscribe / FinishStream and transcribes the app's audio
 // itself with SenseVoice + Silero VAD (sensevoice_engine.c). Foresight's own
 // English engine still loads but is never run.
+//
+// Engine "persian" (or "fa", the default in this fork): same takeover, but the segments are transcribed
+// with Shenava Rizeh, a Persian NeMo CTC model (setup-persian.sh), and spoken
+// numbers are rewritten as digits (persian_itn.c). Falls back to sensevoice if
+// the Persian model is not installed.
 //
 // Engine "gemma": Foresight's own pipeline runs a Gemma 4 E2B ASR bundle:
 //
@@ -119,11 +124,21 @@ static void read_line_file(const char *path, char *out, size_t n) {
 }
 
 static void load_config(void) {
-  char p[1024], engine[64] = "sensevoice";
+  char p[1024], engine[64] = "persian";
   snprintf(p, sizeof p, "%s/tools/foresight-zh/engine", g_home);
   read_line_file(p, engine, sizeof engine);
+  if (strcmp(engine, "persian") == 0 || strcmp(engine, "fa") == 0) {
+    if (sv_available(g_home, SV_LANG_PERSIAN)) {
+      g_engine = ENGINE_SENSEVOICE;
+      logf_("config: engine=persian");
+      sv_start_loading();
+      return;
+    }
+    logf_("config: persian model not installed (run setup-persian.sh) - trying sensevoice");
+    strcpy(engine, "sensevoice");
+  }
   if (strcmp(engine, "sensevoice") == 0) {
-    if (sv_available(g_home)) {
+    if (sv_available(g_home, SV_LANG_SENSEVOICE)) {
       g_engine = ENGINE_SENSEVOICE;
       logf_("config: engine=sensevoice");
       sv_start_loading();

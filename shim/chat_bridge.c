@@ -163,16 +163,23 @@ static char *unspace_cjk(char *s) {
   return s;
 }
 
-// Share of CJK characters among letters.
-static double cjk_share(const char *s) {
-  long cjk = 0, letters = 0;
+// Arabic-script letters (Persian included); digits and punctuation excluded.
+static int is_arabic_letter(unsigned c) {
+  return (c >= 0x0620 && c <= 0x064A) || (c >= 0x066E && c <= 0x06D3) || (c >= 0xFB50 && c <= 0xFDFF) ||
+         (c >= 0xFE70 && c <= 0xFEFF);
+}
+
+// Share of CJK (want_cjk) or Arabic-script characters among letters.
+static double script_share(const char *s, int want_cjk) {
+  long hit = 0, letters = 0;
   for (const unsigned char *p = (const unsigned char *)s; *p;) {
     unsigned c = 0;
     p += utf8_dec(p, &c);
-    if (is_cjk(c)) cjk++, letters++;
-    else if ((c | 0x20) >= 'a' && (c | 0x20) <= 'z') letters++;
+    int cjk = is_cjk(c), ar = is_arabic_letter(c);
+    if (cjk || ar || ((c | 0x20) >= 'a' && (c | 0x20) <= 'z')) letters++;
+    if (want_cjk ? cjk : ar) hit++;
   }
-  return letters ? (double)cjk / letters : 0;
+  return letters ? (double)hit / letters : 0;
 }
 
 // Joins the text parts of a LiteRT-LM message's content (string or part array).
@@ -417,7 +424,7 @@ static size_t on_data(void *p, size_t s, size_t n, void *u) {
 }
 
 // Foresight's meeting brief / notes prompts are English, so the model answers in
-// English even for a Chinese transcript. Ask for the transcript's language,
+// English even for a Chinese or Persian transcript. Ask for the transcript's language,
 // keeping the template headings the app expects.
 static void match_transcript_language(cJSON *msgs) {
   const cJSON *last = NULL, *m;
@@ -430,16 +437,23 @@ static void match_transcript_language(cJSON *msgs) {
   const char *t = content->valuestring;
   if (!strstr(t, "<meeting_transcript>") && !strstr(t, "<transcript_chunk>") && !strstr(t, "<new_transcript_section>"))
     return;
-  if (cjk_share(t) < 0.3) return;
-  static const char note[] =
+  static const char note_zh[] =
       "\n\nLanguage: the transcript is in Chinese. Write all of your output in Simplified Chinese. "
       "Keep the template's markdown headings (such as \"# Overview\" and \"# Details\") and any "
       "required JSON keys or field names exactly as specified, in English.";
+  static const char note_fa[] =
+      "\n\nLanguage: the transcript is in Persian (Farsi). Write all of your output in Persian. "
+      "Keep the template's markdown headings (such as \"# Overview\" and \"# Details\") and any "
+      "required JSON keys or field names exactly as specified, in English.";
+  const char *note, *lang;
+  if (script_share(t, 1) >= 0.3) note = note_zh, lang = "Chinese";
+  else if (script_share(t, 0) >= 0.3) note = note_fa, lang = "Persian";
+  else return;
   cJSON *first = cJSON_GetArrayItem(msgs, 0);
   const cJSON *role = cJSON_GetObjectItemCaseSensitive(first, "role");
   const cJSON *sys = cJSON_GetObjectItemCaseSensitive(first, "content");
   if (cJSON_IsString(role) && strcmp(role->valuestring, "system") == 0 && cJSON_IsString(sys)) {
-    size_t n = strlen(sys->valuestring) + sizeof note;
+    size_t n = strlen(sys->valuestring) + strlen(note) + 1;
     char *merged = malloc(n);
     snprintf(merged, n, "%s%s", sys->valuestring, note);
     cJSON_ReplaceItemInObjectCaseSensitive(first, "content", cJSON_CreateString(merged));
@@ -450,7 +464,7 @@ static void match_transcript_language(cJSON *msgs) {
     cJSON_AddStringToObject(o, "content", note + 2);
     cJSON_InsertItemInArray(msgs, 0, o);
   }
-  logf_("chat: Chinese transcript -> asking for Chinese output");
+  logf_("chat: %s transcript -> asking for %s output", lang, lang);
 }
 
 // Runs one request against the server, appending the reply to the history.

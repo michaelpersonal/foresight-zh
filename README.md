@@ -1,9 +1,9 @@
 # foresight-zh
 
-**English** · [简体中文](README_zh.md)
+**English** · [فارسی](README_fa.md)
 
-Chinese (and mixed Chinese/English) transcription for Google AI Edge Foresight on macOS,
-without modifying the app. Optionally, Foresight's chat runs on a bigger local model
+Chinese (and mixed Chinese/English) or Persian transcription for Google AI Edge Foresight on
+macOS, without modifying the app. Optionally, Foresight's chat runs on a bigger local model
 (Qwen3.8-27B) instead of the built-in Gemma 4 E2B.
 
 Unofficial and not affiliated with Google. No Google code or model weights are included.
@@ -34,6 +34,11 @@ The shim and launcher expect this repo at `~/tools/foresight-zh`.
    ```bash
    ./setup-sensevoice.sh
    ```
+
+   For Persian instead, run `./setup-persian.sh` (about 150MB). It downloads
+   [Shenava Rizeh v1.0](https://huggingface.co/Reza2kn/Shenava-Rizeh-v1.0-sherpa-onnx)
+   (Persian FastConformer CTC, Apache-2.0). In this fork Persian is the default engine;
+   `echo sensevoice > ~/tools/foresight-zh/engine` switches back. See "Persian" below.
 
 3. Build the shim:
 
@@ -93,6 +98,29 @@ so Google's code signature and keychain access are untouched. The shim does thre
 
 If the SenseVoice files are missing or fail to load, the shim falls back to Foresight's own
 engine (English).
+
+### Persian
+
+The default engine in this fork (`persian`, or `fa`) makes the shim transcribe each phrase
+with Shenava Rizeh instead of SenseVoice, through the same sherpa-onnx library, VAD and
+result path. Differences from the Chinese engine:
+
+- The model is Persian-only. English words inside Persian speech come out as Persian-script
+  approximations, and English-only audio is not transcribed well. Switch the engine back for
+  English or Chinese meetings.
+- Shenava spells numbers out. `shim/persian_itn.c` rewrites well-formed spoken numbers as
+  Persian digits (`بیست و پنج` → `۲۵`, `هزار و چهارصد و سه` → `۱۴۰۳`). A lone `یک` stays a
+  word, since it is usually the article "a". Tests: `shim/test/itn_test.sh`.
+- The model reads un-normalized log-mel features; its ONNX metadata tells sherpa-onnx to skip
+  NeMo's per-feature normalization. Do not override the feature config.
+- Persian is space-separated, so the CJK hair-space step does nothing to it.
+- Summaries through the chat bridge: for a mostly Arabic-script transcript the bridge asks for
+  Persian output, keeping the template headings.
+- Foresight's UI lays text out left-to-right. Letters join correctly, but lines stay
+  left-aligned and mixed Persian/English runs can look out of order.
+
+If the Persian model is missing, the shim logs it and falls back to SenseVoice, then to
+Foresight's own English engine.
 
 ### Alternative engine: Gemma 4 E2B
 
@@ -172,13 +200,14 @@ The shim checks before acting and logs what it skipped:
 ## Files
 
 - `shim/foresight_zh.c`: dlsym interposition, ODML hooks, filter patch, engine selection
-- `shim/sensevoice_engine.c`: VAD + SenseVoice engine via sherpa-onnx (loaded with `dlopen`)
+- `shim/sensevoice_engine.c`: VAD + SenseVoice or Shenava (Persian) engine via sherpa-onnx (loaded with `dlopen`)
+- `shim/persian_itn.c`: spoken Persian numbers to digits; `shim/test/itn_test.sh` tests it
 - `shim/chat_bridge.c`: chat on a local OpenAI-compatible server (libcurl)
 - `shim/cJSON.c`, `shim/cJSON.h`: [cJSON](https://github.com/DaveGamble/cJSON) v1.7.18 (MIT)
 - `shim/test/chat_harness.c`: replays saved Foresight conversations through the chat bridge
 - `shim/sherpa-onnx-c-api.h`: sherpa-onnx C API header (v1.13.8, Apache-2.0, Xiaomi Corporation)
 - `shim/test/sv_harness.c`: feeds a raw 48kHz float32 capture through the engine
-- `setup-sensevoice.sh`: downloads the engine; `shim/build.sh`: builds the shim
+- `setup-sensevoice.sh`, `setup-persian.sh`: download the engines; `shim/build.sh`: builds the shim
 - `launch.sh`: launcher; `~/Applications/Foresight 中文.app` wraps it
 - `watcher.sh`, `install-watcher.sh`: auto-relaunch LaunchAgent (detects the shim through
   `~/Library/Logs/foresight-zh/shim.pid`)

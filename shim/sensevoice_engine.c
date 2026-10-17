@@ -3,7 +3,8 @@
 // Replaces Foresight's ASR inference: the shim hands us the 48 kHz float audio
 // Foresight passes to OdmlSpeechProcessorTranscribe, we resample it to 16 kHz,
 // segment it with Silero VAD and transcribe each finished segment with
-// SenseVoice (sherpa-onnx, CPU). sherpa-onnx is dlopen'ed so the shim still
+// SenseVoice (Chinese/English) or Shenava Rizeh (Persian, NeMo CTC), both via
+// sherpa-onnx on the CPU. sherpa-onnx is dlopen'ed so the shim still
 // loads (and the app still starts) if the library is missing.
 
 #include "sensevoice_engine.h"
@@ -15,6 +16,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include "persian_itn.h"
 #include "sherpa-onnx-c-api.h"
 
 #define IN_RATE 48000
@@ -55,6 +57,7 @@ static int g_state;  // 0 loading, 1 ready, -1 failed
 static const SherpaOnnxOfflineRecognizer *g_rec;
 static SherpaOnnxVadModelConfig g_vad_cfg;
 static Stream g_streams[MAX_STREAMS];
+static int g_lang;  // SV_LANG_*
 static char g_dir[1024], g_model[1200], g_tokens[1200], g_vad_model[1200], g_lib[1200];
 
 static int exists(const char *p) {
@@ -103,9 +106,15 @@ static void *load_thread(void *arg) {
     memset(&c, 0, sizeof c);
     c.feat_config.sample_rate = VAD_RATE;
     c.feat_config.feature_dim = 80;
-    c.model_config.sense_voice.model = g_model;
-    c.model_config.sense_voice.language = "auto";
-    c.model_config.sense_voice.use_itn = 1;
+    if (g_lang == SV_LANG_PERSIAN) {
+      // Shenava's ONNX metadata disables NeMo feature normalization; leave the
+      // feature config alone so sherpa-onnx honors it.
+      c.model_config.nemo_ctc.model = g_model;
+    } else {
+      c.model_config.sense_voice.model = g_model;
+      c.model_config.sense_voice.language = "auto";
+      c.model_config.sense_voice.use_itn = 1;
+    }
     c.model_config.tokens = g_tokens;
     c.model_config.num_threads = 2;
     c.model_config.provider = "cpu";
@@ -130,20 +139,26 @@ static void *load_thread(void *arg) {
   g_state = ok ? 1 : -1;
   pthread_cond_broadcast(&g_cv);
   pthread_mutex_unlock(&g_mu);
-  logf_("sensevoice: %s", ok ? "ready" : "unavailable");
+  logf_("asr (%s): %s", g_lang == SV_LANG_PERSIAN ? "persian" : "sensevoice", ok ? "ready" : "unavailable");
   return NULL;
 }
 
-int sv_available(const char *home) {
+int sv_available(const char *home, int lang) {
+  g_lang = lang;
   snprintf(g_dir, sizeof g_dir, "%s/local-llm/models/special/foresight-zh", home);
-  snprintf(g_model, sizeof g_model, "%s/sensevoice/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17/model.int8.onnx", g_dir);
-  snprintf(g_tokens, sizeof g_tokens, "%s/sensevoice/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17/tokens.txt", g_dir);
+  if (lang == SV_LANG_PERSIAN) {
+    snprintf(g_model, sizeof g_model, "%s/persian/shenava-rizeh-v1.0/model.onnx", g_dir);
+    snprintf(g_tokens, sizeof g_tokens, "%s/persian/shenava-rizeh-v1.0/tokens.txt", g_dir);
+  } else {
+    snprintf(g_model, sizeof g_model, "%s/sensevoice/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17/model.int8.onnx", g_dir);
+    snprintf(g_tokens, sizeof g_tokens, "%s/sensevoice/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17/tokens.txt", g_dir);
+  }
   snprintf(g_vad_model, sizeof g_vad_model, "%s/sensevoice/silero_vad.onnx", g_dir);
   snprintf(g_lib, sizeof g_lib, "%s/sherpa-onnx/lib/libsherpa-onnx-c-api.dylib", g_dir);
   const char *need[] = {g_model, g_tokens, g_vad_model, g_lib};
   for (int i = 0; i < 4; i++) {
     if (!exists(need[i])) {
-      logf_("sensevoice: missing %s", need[i]);
+      logf_("asr: missing %s", need[i]);
       return 0;
     }
   }
@@ -184,7 +199,8 @@ static int drain(Stream *s, SvResult *out, int max_out) {
       p_SherpaOnnxDecodeOfflineStream(g_rec, os);
       const SherpaOnnxOfflineRecognizerResult *r = p_SherpaOnnxGetOfflineStreamResult(os);
       if (r && r->text && r->text[0]) {
-        out[n].text = strdup(r->text);
+        // Shenava spells numbers out; turn them into digits.
+        out[n].text = g_lang == SV_LANG_PERSIAN ? persian_itn(r->text) : strdup(r->text);
         out[n].start_us = (long long)seg->start * 1000000 / VAD_RATE;
         out[n].end_us = (long long)(seg->start + seg->n) * 1000000 / VAD_RATE;
         n++;
