@@ -1,4 +1,4 @@
-// Chat bridge for the foresight-zh shim.
+// Chat bridge for the farsight shim.
 //
 // Foresight's chat calls LiteRT-LM's conversation C API (litert_lm_*) with JSON
 // messages and runs Gemma 4 E2B. When the local OpenAI-compatible server is up
@@ -163,16 +163,63 @@ static char *unspace_cjk(char *s) {
   return s;
 }
 
-// Share of CJK characters among letters.
-static double cjk_share(const char *s) {
-  long cjk = 0, letters = 0;
+// Arabic-script letters (Persian included); digits and punctuation excluded.
+static int is_arabic_letter(unsigned c) {
+  return (c >= 0x0620 && c <= 0x064A) || (c >= 0x066E && c <= 0x06D3) || (c >= 0xFB50 && c <= 0xFDFF) ||
+         (c >= 0xFE70 && c <= 0xFEFF);
+}
+
+// Share of CJK (want_cjk) or Arabic-script characters among letters.
+static double script_share(const char *s, int want_cjk) {
+  long hit = 0, letters = 0;
   for (const unsigned char *p = (const unsigned char *)s; *p;) {
     unsigned c = 0;
     p += utf8_dec(p, &c);
-    if (is_cjk(c)) cjk++, letters++;
-    else if ((c | 0x20) >= 'a' && (c | 0x20) <= 'z') letters++;
+    int cjk = is_cjk(c), ar = is_arabic_letter(c);
+    if (cjk || ar || ((c | 0x20) >= 'a' && (c | 0x20) <= 'z')) letters++;
+    if (want_cjk ? cjk : ar) hit++;
   }
-  return letters ? (double)cjk / letters : 0;
+  return letters ? (double)hit / letters : 0;
+}
+
+// "Write in Persian" instruction for summaries of Persian transcripts. By default
+// the template's headings are translated too («# مرور کلی», «# جزئیات»);
+// FARSIGHT_HEADINGS=en keeps them in English. JSON keys always stay in English.
+static const char *persian_note(void) {
+  static const char fa[] =
+      "\n\nLanguage: the transcript is in Persian (Farsi). Write all of your output in Persian (Farsi), "
+      "including the markdown headings: write \"# مرور کلی\" instead of \"# Overview\" and "
+      "\"# جزئیات\" instead of \"# Details\", and translate any other heading the same way. "
+      "Keep any required JSON keys or field names exactly as specified, in English.";
+  static const char en[] =
+      "\n\nLanguage: the transcript is in Persian (Farsi). Write all of your output in Persian (Farsi). "
+      "Keep the template's markdown headings (such as \"# Overview\" and \"# Details\") and any "
+      "required JSON keys or field names exactly as specified, in English.";
+  const char *h = getenv("FARSIGHT_HEADINGS");
+  return h && strcmp(h, "en") == 0 ? en : fa;
+}
+
+// Script share measured only inside the transcript tags, so a long English
+// prompt template around a short Persian transcript does not hide it.
+static double transcript_share(const char *s, int want_cjk) {
+  static const char *tags[] = {"meeting_transcript", "transcript_chunk", "new_transcript_section"};
+  for (size_t i = 0; i < 3; i++) {
+    char open[64], close[64];
+    snprintf(open, sizeof open, "<%s>", tags[i]);
+    snprintf(close, sizeof close, "</%s>", tags[i]);
+    const char *a = strstr(s, open);
+    if (!a) continue;
+    a += strlen(open);
+    const char *b = strstr(a, close);
+    size_t n = b ? (size_t)(b - a) : strlen(a);
+    char *inner = malloc(n + 1);
+    memcpy(inner, a, n);
+    inner[n] = 0;
+    double r = script_share(inner, want_cjk);
+    free(inner);
+    return r;
+  }
+  return script_share(s, want_cjk);
 }
 
 // Joins the text parts of a LiteRT-LM message's content (string or part array).
@@ -417,7 +464,7 @@ static size_t on_data(void *p, size_t s, size_t n, void *u) {
 }
 
 // Foresight's meeting brief / notes prompts are English, so the model answers in
-// English even for a Chinese transcript. Ask for the transcript's language,
+// English even for a Chinese or Persian transcript. Ask for the transcript's language,
 // keeping the template headings the app expects.
 static void match_transcript_language(cJSON *msgs) {
   const cJSON *last = NULL, *m;
@@ -430,16 +477,20 @@ static void match_transcript_language(cJSON *msgs) {
   const char *t = content->valuestring;
   if (!strstr(t, "<meeting_transcript>") && !strstr(t, "<transcript_chunk>") && !strstr(t, "<new_transcript_section>"))
     return;
-  if (cjk_share(t) < 0.3) return;
-  static const char note[] =
+  static const char note_zh[] =
       "\n\nLanguage: the transcript is in Chinese. Write all of your output in Simplified Chinese. "
       "Keep the template's markdown headings (such as \"# Overview\" and \"# Details\") and any "
       "required JSON keys or field names exactly as specified, in English.";
+  const char *note_fa = persian_note();
+  const char *note, *lang;
+  if (transcript_share(t, 1) >= 0.3) note = note_zh, lang = "Chinese";
+  else if (transcript_share(t, 0) >= 0.3) note = note_fa, lang = "Persian";
+  else return;
   cJSON *first = cJSON_GetArrayItem(msgs, 0);
   const cJSON *role = cJSON_GetObjectItemCaseSensitive(first, "role");
   const cJSON *sys = cJSON_GetObjectItemCaseSensitive(first, "content");
   if (cJSON_IsString(role) && strcmp(role->valuestring, "system") == 0 && cJSON_IsString(sys)) {
-    size_t n = strlen(sys->valuestring) + sizeof note;
+    size_t n = strlen(sys->valuestring) + strlen(note) + 1;
     char *merged = malloc(n);
     snprintf(merged, n, "%s%s", sys->valuestring, note);
     cJSON_ReplaceItemInObjectCaseSensitive(first, "content", cJSON_CreateString(merged));
@@ -450,7 +501,7 @@ static void match_transcript_language(cJSON *msgs) {
     cJSON_AddStringToObject(o, "content", note + 2);
     cJSON_InsertItemInArray(msgs, 0, o);
   }
-  logf_("chat: Chinese transcript -> asking for Chinese output");
+  logf_("chat: %s transcript -> asking for %s output", lang, lang);
 }
 
 // Runs one request against the server, appending the reply to the history.
@@ -604,10 +655,92 @@ static int push_message(Conv *c, const char *msg_json) {
   return 1;
 }
 
+// When Gemma (Foresight's own model) handles a request, the app's English summary
+// prompt makes it answer in English even for a Persian transcript. Add the same
+// language instruction to the user message. Returns a new message JSON, or NULL
+// to send the original.
+static char *gemma_language_msg(const char *msg) {
+  if (!msg || (!strstr(msg, "<meeting_transcript>") && !strstr(msg, "<transcript_chunk>") &&
+               !strstr(msg, "<new_transcript_section>")))
+    return NULL;
+  cJSON *m = cJSON_Parse(msg);
+  if (!m) return NULL;
+  cJSON *content = cJSON_GetObjectItemCaseSensitive(m, "content");
+  char *text = content ? content_text(content) : NULL;
+  int fa = text && transcript_share(text, 0) >= 0.3;
+  free(text);
+  if (!fa) {
+    cJSON_Delete(m);
+    return NULL;
+  }
+  const char *note = persian_note();
+  if (cJSON_IsString(content)) {
+    size_t n = strlen(content->valuestring) + strlen(note) + 1;
+    char *merged = malloc(n);
+    snprintf(merged, n, "%s%s", content->valuestring, note);
+    cJSON_ReplaceItemInObjectCaseSensitive(m, "content", cJSON_CreateString(merged));
+    free(merged);
+  } else if (cJSON_IsArray(content)) {
+    cJSON *part = cJSON_CreateObject();
+    cJSON_AddStringToObject(part, "type", "text");
+    cJSON_AddStringToObject(part, "text", note + 2);
+    cJSON_AddItemToArray(content, part);
+  } else {
+    cJSON_Delete(m);
+    return NULL;
+  }
+  char *out = cJSON_PrintUnformatted(m);
+  cJSON_Delete(m);
+  logf_("chat: Persian transcript -> asking Gemma for Persian output");
+  return out;
+}
+
+// Gemma sampling. Foresight runs Gemma at temperature 0.4 / top_k 40. At that
+// temperature the small on-device model garbles Persian words in summaries
+// («تحلی» for «تحلیلی», «تعاری» for «تعاریف»). Lower values keep it on the most
+// likely spelling. FARSIGHT_GEMMA_SAMPLING="<temperature>,<top_k>" (default
+// "0.1,10"), or "app" to keep Foresight's own values.
+static int set_sampling(cJSON *j, double temp, int top_k, int depth) {
+  int n = 0;
+  if (!j || depth > 4) return 0;
+  cJSON *c;
+  cJSON_ArrayForEach(c, j) {
+    if (c->string && cJSON_IsNumber(c) && !strcmp(c->string, "temperature")) {
+      cJSON_SetNumberValue(c, temp);
+      n++;
+    } else if (c->string && cJSON_IsNumber(c) && !strcmp(c->string, "top_k")) {
+      cJSON_SetNumberValue(c, top_k);
+      n++;
+    } else if (cJSON_IsObject(c)) {
+      n += set_sampling(c, temp, top_k, depth + 1);
+    }
+  }
+  return n;
+}
+
+static void *gemma_create(void *engine, const char *config_json) {
+  const char *pref = getenv("FARSIGHT_GEMMA_SAMPLING");
+  if (!config_json || (pref && !strcmp(pref, "app"))) return R.create_v2(engine, config_json);
+  double temp = 0.1;
+  int top_k = 10;
+  if (pref) sscanf(pref, "%lf,%d", &temp, &top_k);
+  cJSON *cfg = cJSON_Parse(config_json);
+  if (!cfg) return R.create_v2(engine, config_json);
+  int n = set_sampling(cfg, temp, top_k, 0);
+  char *out = n ? cJSON_PrintUnformatted(cfg) : NULL;
+  cJSON_Delete(cfg);
+  static int logged;
+  if (!logged++) logf_("chat: Gemma sampling %s", n ? "set to low temperature" : "fields not found, unchanged");
+  if (!out) return R.create_v2(engine, config_json);
+  void *conv = R.create_v2(engine, out);
+  free(out);
+  return conv;
+}
+
 // ------------------------------------------------------------ replacements ---
 
 static void *my_create_v2(void *engine, const char *config_json) {
-  if (!config_json || !server_up()) return R.create_v2(engine, config_json);
+  if (!config_json || !server_up()) return gemma_create(engine, config_json);
   cJSON *cfg = cJSON_Parse(config_json);
   if (!cfg) return R.create_v2(engine, config_json);
   cJSON *msgs = cJSON_CreateArray();
@@ -650,9 +783,43 @@ static void my_delete(void *conv) {
   unref(c);
 }
 
+// Trace mode: log every chunk Gemma streams back, to tell model misspellings apart
+// from text damaged on the way (e.g. a UTF-8 character split across chunks).
+typedef struct {
+  stream_cb cb;
+  void *ud;
+  FILE *f;
+} TraceCb;
+
+static void trace_chunk(char *chunk, void *u) {
+  TraceCb *t = u;
+  if (t->f) {
+    fprintf(t->f, "%s\n", chunk ? chunk : "(null)");
+    fflush(t->f);
+  }
+  int last = !chunk || !chunk[0];
+  t->cb(chunk, t->ud);
+  if (last) {
+    if (t->f) fclose(t->f);
+    free(t);
+  }
+}
+
 static int my_send_stream(void *conv, const char *msg, stream_cb cb, void *ud) {
   Conv *c = find_conv(conv);
-  if (!c) return R.send_stream(conv, msg, cb, ud);
+  if (!c) {
+    // Kept alive (not freed): the engine may read the message after returning.
+    char *fa = gemma_language_msg(msg);
+    if (g_trace_chat && fa) {
+      char p[800];
+      snprintf(p, sizeof p, "%s/gemma-%ld.jsonl", g_dump_dir, (long)time(NULL));
+      TraceCb *t = calloc(1, sizeof *t);
+      t->cb = cb, t->ud = ud, t->f = fopen(p, "w");
+      logf_("chat: tracing Gemma output to %s", p);
+      return R.send_stream(conv, fa, trace_chunk, t);
+    }
+    return R.send_stream(conv, fa ? fa : msg, cb, ud);
+  }
   if (!msg || !push_message(c, msg)) {
     cb(empty_chunk(), ud);
     return 0;
@@ -673,7 +840,12 @@ static int my_send_stream(void *conv, const char *msg, stream_cb cb, void *ud) {
 // Non-streaming variant: same streamed request, reply returned as one JSON string.
 static char *my_send(void *conv, const char *msg) {
   Conv *c = find_conv(conv);
-  if (!c) return R.send(conv, msg);
+  if (!c) {
+    char *fa = gemma_language_msg(msg);
+    char *r = R.send(conv, fa ? fa : msg);
+    free(fa);
+    return r;
+  }
   if (!msg || !push_message(c, msg)) return text_chunk("");
   Req *r = calloc(1, sizeof *r);
   r->conv = c;
@@ -687,16 +859,16 @@ static char *my_send(void *conv, const char *msg) {
 
 void chat_bridge_init(const char *home, int trace) {
   g_trace_chat = trace;
-  snprintf(g_dump_dir, sizeof g_dump_dir, "%s/Library/Logs/foresight-zh/lm", home);
+  snprintf(g_dump_dir, sizeof g_dump_dir, "%s/Library/Logs/farsight/lm", home);
   if (trace) mkdir(g_dump_dir, 0755);
   snprintf(g_url, sizeof g_url, "http://127.0.0.1:8096/v1");
   snprintf(g_model, sizeof g_model, "qwen3.8-27b-mtp");
   char p[1024], line[1200] = "";
-  const char *env = getenv("FORESIGHT_ZH_CHAT");
+  const char *env = getenv("FARSIGHT_CHAT");
   if (env) {
     snprintf(line, sizeof line, "%s", env);
   } else {
-    snprintf(p, sizeof p, "%s/tools/foresight-zh/chat", home);
+    snprintf(p, sizeof p, "%s/tools/farsight/chat", home);
     FILE *f = fopen(p, "r");
     if (f) {
       if (fgets(line, sizeof line, f)) line[strcspn(line, "\r\n")] = 0;
@@ -732,7 +904,22 @@ void chat_bridge_init(const char *home, int trace) {
 }
 
 void *chat_bridge_wrap(const char *symbol, void *real) {
-  if (!g_url[0]) return NULL;
+  if (!g_url[0]) {
+    // Bridge off: still wrap creation (sampling) and sending (Persian instruction) for Gemma.
+    if (strcmp(symbol, "litert_lm_create_conversation_v2") == 0) {
+      R.create_v2 = (create_v2_fn)real;
+      return (void *)gemma_create;
+    }
+    if (strcmp(symbol, "litert_lm_conversation_send_message_stream") == 0) {
+      R.send_stream = (send_stream_fn)real;
+      return (void *)my_send_stream;
+    }
+    if (strcmp(symbol, "litert_lm_conversation_send_message") == 0) {
+      R.send = (send_fn)real;
+      return (void *)my_send;
+    }
+    return NULL;
+  }
 #define HOOK(name, field, fn)                \
   if (strcmp(symbol, name) == 0) {           \
     R.field = (__typeof__(R.field))real;     \

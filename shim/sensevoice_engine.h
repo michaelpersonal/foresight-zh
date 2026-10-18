@@ -6,8 +6,11 @@ typedef struct {
   long long end_us;
 } SvResult;
 
-// Returns 1 if the SenseVoice model, VAD model and sherpa-onnx library are installed.
-int sv_available(const char *home);
+enum { SV_LANG_SENSEVOICE, SV_LANG_PERSIAN };
+
+// Selects the model (SV_LANG_*) and returns 1 if it, the VAD model and the
+// sherpa-onnx library are installed.
+int sv_available(const char *home, int lang);
 // Loads sherpa-onnx and the models on a background thread.
 void sv_start_loading(void);
 // Feeds 48 kHz mono float audio for a stream; writes finished phrases to out.

@@ -3,14 +3,14 @@
 # without the shim (plain launch from the Dock, a notification, a login item or an
 # update), relaunches it through launch.sh.
 #
-# Pause:  touch ~/Library/Logs/foresight-zh/watcher.paused   (rm to resume)
-LOGDIR="$HOME/Library/Logs/foresight-zh"
+# Pause:  touch ~/Library/Logs/farsight/watcher.paused   (rm to resume)
+LOGDIR="$HOME/Library/Logs/farsight"
 DIR=${0:A:h}
 mkdir -p "$LOGDIR"
 log() { print -r -- "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOGDIR/watcher.log"; }
 
 [[ -e "$LOGDIR/watcher.paused" ]] && exit 0
-[[ -f "$DIR/shim/libforesight_zh.dylib" ]] || exit 0
+[[ -f "$DIR/shim/libfarsight.dylib" ]] || exit 0
 pid=$(pgrep -x Foresight | head -1)
 [[ -z "$pid" ]] && exit 0
 [[ "$(cat "$LOGDIR/shim.pid" 2>/dev/null)" == "$pid" ]] && exit 0

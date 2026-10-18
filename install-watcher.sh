@@ -1,6 +1,6 @@
 #!/bin/zsh
 # Installs (or with --uninstall removes) the LaunchAgent that keeps Foresight running with the shim.
-LABEL=io.github.foresight-zh.watcher
+LABEL=io.github.hadi-buddy.farsight.watcher
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DIR=${0:A:h}
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null
@@ -15,7 +15,7 @@ cat > "$PLIST" <<PLIST
   <key>StartInterval</key><integer>5</integer>
   <key>RunAtLoad</key><true/>
   <key>ProcessType</key><string>Background</string>
-  <key>StandardErrorPath</key><string>$HOME/Library/Logs/foresight-zh/watcher.err</string>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/farsight/watcher.err</string>
 </dict>
 </plist>
 PLIST

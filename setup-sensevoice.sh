@@ -1,9 +1,9 @@
 #!/bin/zsh
 # Downloads the SenseVoice engine: sherpa-onnx C library, SenseVoice-Small (int8) and Silero VAD.
-# Installs into ~/local-llm/models/special/foresight-zh (about 270MB).
+# Installs into ~/Library/Application Support/farsight (about 270MB).
 set -e
 SHERPA_VERSION=1.13.8
-DEST=${FORESIGHT_ZH_MODELS:-$HOME/local-llm/models/special/foresight-zh}
+DEST="${FARSIGHT_MODELS:-$HOME/Library/Application Support/farsight}"
 REL=https://github.com/k2-fsa/sherpa-onnx/releases/download
 mkdir -p "$DEST/sensevoice" "$DEST/sherpa-onnx"
 

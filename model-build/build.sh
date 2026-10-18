@@ -2,12 +2,12 @@
 # Builds the Chinese-capable ASR bundle from the Gemma 4 E2B model Foresight downloads (models/15).
 #
 #   LITERT_VENV  venv with `pip install litert-lm-api litert-lm`  (default: ~/local-llm/venvs/litert)
-#   OUT          output .litertlm  (default: ~/local-llm/models/special/foresight-zh/zh_asr_gemma4e2b_v3.litertlm)
+#   OUT          output .litertlm  (default: ~/Library/Application Support/farsight/zh_asr_gemma4e2b_v3.litertlm)
 #
 # Quit Foresight first if it is running with the shim: it memory-maps the output file.
 set -e
 VENV=${LITERT_VENV:-$HOME/local-llm/venvs/litert}
-OUT=${OUT:-$HOME/local-llm/models/special/foresight-zh/zh_asr_gemma4e2b_v3.litertlm}
+OUT="${OUT:-$HOME/Library/Application Support/farsight/zh_asr_gemma4e2b_v3.litertlm}"
 MODELS="$HOME/Library/Application Support/com.google.AIEdgeForesight/models"
 SRC=$(ls "$MODELS"/15/*/*.litertlm 2>/dev/null | head -1)
 [[ -f "$SRC" ]] || { echo "Gemma 4 E2B not found under $MODELS/15 - open Foresight once and let it finish downloading."; exit 1; }
